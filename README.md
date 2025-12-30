@@ -6,6 +6,37 @@
 
 本项目意在使用 CSP 模型实现一个简单的共识算法，在巩固共识算法理解之余，理解 CSP 模型，了解一些实现惯例和设计模型，领略原始的 Go 味道。
 
+## 快速测试
+
+```bash
+$ cd scripts
+$ bash ./run_and_check.sh
+Check on low pressure
+----------begin to check------------
+node 0 commits 300 times
+node 1 commits 400 times
+node 2 commits 500 times
+node 3 commits 500 times
+node 4 commits 500 times
+---------- check validity ------------
+pass
+---------- check safety --------------
+pass
+---------- end -----------------------
+Check on high pressure
+----------begin to check------------
+node 0 commits 1521 times
+node 1 commits 2056 times
+node 2 commits 2520 times
+node 3 commits 2521 times
+node 4 commits 2520 times
+---------- check validity ------------
+pass
+---------- check safety --------------
+pass
+---------- end -----------------------
+```
+
 ## Go
 
 Go 是一个编译型语言，它的特点包括

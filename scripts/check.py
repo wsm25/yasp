@@ -3,14 +3,14 @@ import re
 
 
 class node_info:
-    def __init__(self, id):
+    def __init__(self, id: int):
         self.id = id
-        self.proposals = []
-        self.commits = {}
+        self.proposals: list[str] = []
+        self.commits: dict[int, str] = {}
         self.maxSeq = 0
         self.read_from_log(id)
 
-    def read_from_log(self, id):
+    def read_from_log(self, id: int):
         filename = "../log/instancelog" + str(id) + ".log"
         propose_pattern = re.compile(
             r"generate Instance\[(.*?)\] in seq (\d+) at (\d+)"
@@ -34,7 +34,7 @@ class node_info:
             print(f"node {id} commits {len(self.commits.keys())} times")
 
 
-def check_safety(nodes):
+def check_safety(nodes: list[node_info]):
     n = len(nodes)
     for i in range(n):
         for j in range(n):
@@ -57,10 +57,15 @@ def check_safety(nodes):
     return True
 
 
-def check_validity(nodes):
+def check_validity(nodes: list[node_info]):
     all_proposals = []
     all_commits = []
     for node in nodes:
+        if len(node.commits) == 0:
+            print(f"node {node.id} have empty commit")
+            print("Hint: you may set greater test time")
+            return False
+
         all_proposals += node.proposals
         all_commits += node.commits.values()
     for commit in all_commits:
