@@ -33,7 +33,7 @@ func NewLogger(conf *Config) *Logger {
 	if err := os.MkdirAll(logDir, 0777); err != nil {
 		fmt.Println("failed to create log directory:", err)
 	}
-	logfile := logDir + "node" + strconv.Itoa(int(conf.Id)) + ".log"
+	logfile := logDir + "instancelog" + strconv.Itoa(int(conf.Id)) + ".log"
 	f, err := os.OpenFile(logfile, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0777)
 	if err != nil {
 		fmt.Println("create log file failed:", err.Error())

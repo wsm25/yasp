@@ -16,8 +16,7 @@ type RoundSeq struct {
 
 type RoundSeqManager struct {
 	RoundSeq
-	mu       sync.Mutex // must: bump is a stop-the-world operation
-	waitCond *sync.Cond
+	mu sync.Mutex // must: bump is a stop-the-world operation
 }
 
 func NewRoundSeq(conf *Config) *RoundSeqManager {
@@ -34,7 +33,6 @@ func NewRoundSeq(conf *Config) *RoundSeqManager {
 		Q:         int(conf.N - conf.F),
 		RoundSeqs: conf.RoundSeqs,
 	}
-	m.waitCond = sync.NewCond(&m.mu)
 	return m
 }
 
@@ -57,14 +55,11 @@ func (r *RoundSeqManager) Read() RoundSeq {
 	return rs
 }
 
+// note it only increases seq and estroud
 func (r *RoundSeqManager) BumpSeq() RoundSeq {
 	r.mu.Lock()
 	r.Seq += 1
 	r.Estround += 1
-	if r.Seq >= r.RoundSeqs {
-		r.Seq = 0
-		r.bumpRound(r.Round + 1)
-	}
 	rs := r.RoundSeq
 	r.mu.Unlock()
 	return rs
@@ -88,28 +83,15 @@ func (r *RoundSeqManager) SetNewer(round int, seq int) RoundSeq {
 	r.Round = round
 	r.Seq = seq
 	r.Recalc()
-	r.waitCond.Broadcast()
 	return r.RoundSeq
 }
 
 // without lock
 func (r *RoundSeqManager) bumpRound(new int) {
-	if new <= r.Round {
+	if new < r.Round {
 		return
 	}
 	r.Round = new
 	r.Seq = 0
 	r.Recalc()
-	r.waitCond.Broadcast()
-}
-
-func (r *RoundSeqManager) WaitLeader() RoundSeq {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	for {
-		if r.IsLeader() {
-			return r.RoundSeq
-		}
-		r.waitCond.Wait()
-	}
 }

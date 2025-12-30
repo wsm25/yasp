@@ -40,8 +40,10 @@ Go 本身上手很简单，无非变量、函数，一如任何你写过的其�
 
 - 中心化数据传递：中心化广播+2 stage commit 机制保证 quorum。
 - 换主：
-  - 换主触发：求使用固定 max round 触发换主；timeout 也会触发换主
-  - 选举：（算法有待改进）用一个本地的循环计数器，不需同步
+  - 换主触发：使用固定 timeout 触发换主
+    - leader 等待 timeout 消息再启动
+    - follower 等待 leader 消息
+  - 选举：用 timeout 触发的本地的循环计数器，不需同步
   - 换主同步：read + impose，全量同步
 
 ## 设计

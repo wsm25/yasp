@@ -1,7 +1,8 @@
+# python run.py 10 100 5
 import subprocess
 import sys
 
-subprocess.run("cd ../cmd && make", shell=True, check=True)
+subprocess.run("cd ../cmd && go build -o node yasp/cmd", shell=True, check=True)
 
 procs = []
 for i in range(5):

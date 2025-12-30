@@ -64,7 +64,6 @@ func (m *Messager) Run() {
 	defer m.Kill()
 	// round bumper
 	m.conf.Wg.Add(1)
-	go m.RunRoundBumper()
 	m.ConnPeers()
 	for !m.dead.Load() {
 		msg, err := m.msgChan.Read(m.ctx)
@@ -93,8 +92,6 @@ func (m *Messager) HandleMsg(msg *PaxosMsg) {
 				Seq:   seq,
 				To:    msg.From,
 			})
-		} else if msg.Round > round {
-			m.BumpRound(msg.Round, msg.Seq)
 		} else {
 			switch msg.Type {
 			case MsgNack:
@@ -108,35 +105,6 @@ func (m *Messager) HandleMsg(msg *PaxosMsg) {
 			}
 		}
 	}
-}
-
-func (m *Messager) RunRoundBumper() {
-	defer m.conf.Wg.Done()
-	t := time.NewTicker(m.conf.Timeout)
-	defer t.Stop()
-	for !m.dead.Load() {
-		select {
-		case <-t.C:
-			rs := m.leader.roundseq.Read()
-			m.BumpRound(rs.Round+1, 0)
-		case <-m.ctx.Done():
-		}
-	}
-}
-
-func (m *Messager) BumpRound(round, seq int) {
-	rs := m.leader.roundseq.SetNewer(round, seq)
-	m.follower.roundseq.SetNewer(round, seq)
-
-	msg := &PaxosMsg{
-		Type:  MsgBump,
-		From:  uint8(rs.MyId),
-		To:    uint8(rs.MyId),
-		Seq:   rs.Seq,
-		Round: rs.Round,
-	}
-	m.leader.Push(m.ctx, msg)
-	m.follower.Push(m.ctx, msg)
 }
 
 func (m *Messager) RunRpcServer() {

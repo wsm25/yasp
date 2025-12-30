@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"slices"
+	"time"
 )
 
 type Leader struct {
@@ -26,48 +27,70 @@ func NewLeader(conf *Config, processors *Processors) *Leader {
 
 func (l *Leader) Run() {
 	defer l.Kill()
-	for !l.dead.Load() {
-		// new round
-		println("Waiting leader")
-		rs := l.roundseq.WaitLeader()
-		round, seq := rs.Round, rs.Seq
-		println("New leader round", round, seq)
 
+	t := time.NewTicker(l.conf.Timeout)
+	defer t.Stop()
+	round, seq := -1, 0
+	startup := true
+round:
+	for !l.dead.Load() {
+		if startup {
+			startup = false
+		} else {
+			select {
+			case <-t.C:
+			case <-l.ctx.Done():
+				break round
+			}
+		}
+		// new round
+		l.roundseq.BumpRound(round + 1)
+		// wait for leader (using timeouter)
+		rs := l.roundseq.Read()
+		round, seq = rs.Round, rs.Seq
+		l.processors.logger.logger.Printf("Waiting leader round")
+		if !rs.IsLeader() {
+			continue
+		}
+		l.processors.logger.logger.Printf("New leader round %d, seq %d", round, seq)
+
+		ctx, cancel := context.WithTimeout(l.ctx, l.conf.Timeout)
 		// sync
 		if seq == 0 {
-			err := l.Sync(rs)
+			err := l.Sync(ctx, rs)
 			if err != nil {
-				if !IsBumpErr(err) {
-					// l.processors.roundseq.BumpRound(round + 1)
-				}
+				l.processors.logger.logger.Printf("Leader sync %d fail with error: %s", round, err.Error())
+				cancel()
 				continue
 			}
 		}
 
 		// keep generate and impose
-		for {
-			err := l.DoSeq(rs)
+		for range l.conf.RoundSeqs - seq {
+			err := l.DoSeq(ctx, rs)
 			if err != nil {
-				if !IsBumpErr(err) {
-					// l.processors.roundseq.BumpRound(round + 1)
-				}
-				continue
+				l.processors.logger.logger.Printf("Leader doseq (%d,%d) fail with error: %s", round, seq, err.Error())
+				break
 			}
 			rs = l.roundseq.BumpSeq()
 			seq++
+			if seq == l.conf.RoundSeqs {
+				break
+			}
 			if rs.Round != round || rs.Seq != seq {
 				break
 			}
 		}
+		cancel()
 	}
 }
 
 // init sync at begin of round
-func (l *Leader) Sync(rs RoundSeq) error {
+func (l *Leader) Sync(ctx context.Context, rs RoundSeq) error {
 	quorum := l.conf.Q
 
 	// 1. read
-	l.processors.messager.Push(l.ctx, &PaxosMsg{
+	l.processors.messager.Push(ctx, &PaxosMsg{
 		Type: MsgRead,
 		To:   BroadcaseId,
 	}, rs)
@@ -77,7 +100,7 @@ func (l *Leader) Sync(rs RoundSeq) error {
 	localData := make([]Log, 0)
 	localMap := make(map[int]int) // Estround -> index in localData
 	for ready < quorum {
-		msg, err := l.leaderChan.Read(l.ctx)
+		msg, err := l.leaderChan.ReadChecked(ctx, rs)
 		if err != nil {
 			return err
 		}
@@ -107,7 +130,7 @@ func (l *Leader) Sync(rs RoundSeq) error {
 	})
 
 	// 3. impose
-	l.processors.messager.Push(l.ctx, &PaxosMsg{
+	l.processors.messager.Push(ctx, &PaxosMsg{
 		Type: MsgImpose,
 		Data: localData,
 		To:   BroadcaseId,
@@ -116,7 +139,7 @@ func (l *Leader) Sync(rs RoundSeq) error {
 	// 4. ack
 	ready = 0
 	for ready < quorum {
-		msg, err := l.leaderChan.Read(l.ctx)
+		msg, err := l.leaderChan.ReadChecked(ctx, rs)
 		if err != nil {
 			return err
 		}
@@ -126,7 +149,7 @@ func (l *Leader) Sync(rs RoundSeq) error {
 	}
 
 	// 5. decide
-	l.processors.messager.Push(l.ctx, &PaxosMsg{
+	l.processors.messager.Push(ctx, &PaxosMsg{
 		Type: MsgDecide,
 		To:   BroadcaseId,
 	}, rs)
@@ -134,14 +157,14 @@ func (l *Leader) Sync(rs RoundSeq) error {
 	return nil
 }
 
-func (l *Leader) DoSeq(rs RoundSeq) error {
+func (l *Leader) DoSeq(ctx context.Context, rs RoundSeq) error {
 	// generate and impose
 	data := make([]byte, l.conf.DataSize)
 	rand.Read(data)
 
 	// 1. propose
 	l.processors.logger.logger.Printf("Leader proposing, round=%d, seq=%d", rs.Round, rs.Seq)
-	l.processors.messager.Push(l.ctx, &PaxosMsg{
+	l.processors.messager.Push(ctx, &PaxosMsg{
 		Type: MsgPropose,
 		Data: data,
 		To:   BroadcaseId,
@@ -151,7 +174,7 @@ func (l *Leader) DoSeq(rs RoundSeq) error {
 	l.processors.logger.logger.Printf("Leader acking, round=%d, seq=%d", rs.Round, rs.Seq)
 	var ready uint8 = 0
 	for ready < l.conf.Q {
-		msg, err := l.leaderChan.Read(l.ctx)
+		msg, err := l.leaderChan.ReadChecked(ctx, rs)
 		if err != nil {
 			return err
 		}
@@ -162,7 +185,7 @@ func (l *Leader) DoSeq(rs RoundSeq) error {
 
 	// 3. commit
 	l.processors.logger.logger.Printf("Leader commiting, round=%d, seq=%d", rs.Round, rs.Seq)
-	l.processors.messager.Push(l.ctx, &PaxosMsg{
+	l.processors.messager.Push(ctx, &PaxosMsg{
 		Type: MsgCommit,
 		To:   BroadcaseId,
 	}, rs)

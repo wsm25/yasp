@@ -23,7 +23,7 @@ func main() {
 
 	node := GetConfig(*id)
 	fmt.Printf("Node config:\n%+v\n\n", node)
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second*time.Duration(*testTime))
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second*time.Duration(*testTime+1))
 
 	bg := core.BackgroundConfig{
 		Context:   ctx,
@@ -48,6 +48,7 @@ func main() {
 	}
 	consensus.Stop()
 	cancel()
-	bg.Wg.Wait()
+	fmt.Println("\n等待退出...")
+	// bg.Wg.Wait()
 	fmt.Printf("Node %v finished test\n", *id)
 }

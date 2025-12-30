@@ -35,7 +35,7 @@ type BackgroundConfig struct {
 
 var (
 	ErrChannelTimeout = errors.New("channel operation timeout")
-	ErrNewRound       = errors.New("bump to new round")
+	ErrMismatch       = errors.New("bump to new round")
 	ErrUnexpectedType = errors.New("unexcepted message")
 )
 
@@ -79,13 +79,23 @@ type TimeoutChan struct {
 }
 
 // returns false on timeout or close; note new round also treat as error
-func (t *TimeoutChan) ReadChecked(ctx context.Context, rs RoundSeq) (*PaxosMsg, error) {
-	msg, err := t.Read(ctx)
-	if err != nil {
-		return msg, err
+func (t *TimeoutChan) ReadChecked(ctx context.Context, rs RoundSeq) (msg *PaxosMsg, err error) {
+	for {
+		msg, err = t.Read(ctx)
+		if err != nil {
+			return msg, err
+		}
+		if msg.Round >= rs.Round {
+			break
+		}
 	}
 	if msg.Round != rs.Round || msg.Seq != rs.Seq {
-		return msg, ErrNewRound
+		// push for next read
+		if msg.Round > rs.Round {
+			t.Write(ctx, msg)
+		}
+		return msg, ErrMismatch
+		// fmt.Errorf("Roundseq mismatch: expect (%d,%d), got %+v", rs.Round, rs.Seq, msg)
 	}
 	return msg, nil
 }
@@ -123,5 +133,5 @@ func (t *TimeoutChan) Close() {
 }
 
 func IsBumpErr(err error) bool {
-	return errors.Is(err, ErrNewRound)
+	return errors.Is(err, ErrMismatch)
 }
