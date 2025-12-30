@@ -22,6 +22,7 @@ func main() {
 	flag.Parse()
 
 	node := GetConfig(*id)
+	fmt.Printf("Node config:\n%+v\n\n", node)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*time.Duration(*testTime))
 
 	bg := core.BackgroundConfig{

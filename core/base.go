@@ -79,14 +79,22 @@ type TimeoutChan struct {
 }
 
 // returns false on timeout or close; note new round also treat as error
+func (t *TimeoutChan) ReadChecked(ctx context.Context, rs RoundSeq) (*PaxosMsg, error) {
+	msg, err := t.Read(ctx)
+	if err != nil {
+		return msg, err
+	}
+	if msg.Round != rs.Round || msg.Seq != rs.Seq {
+		return msg, ErrNewRound
+	}
+	return msg, nil
+}
+
 func (t *TimeoutChan) Read(ctx context.Context) (*PaxosMsg, error) {
 	timer := time.NewTimer(t.timeout)
 	defer timer.Stop()
 	select {
 	case msg := <-t.C:
-		if msg.Type == MsgBump {
-			return msg, ErrNewRound
-		}
 		return msg, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()

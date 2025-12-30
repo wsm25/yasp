@@ -8,23 +8,17 @@ import (
 	"net/http"
 	"net/rpc"
 	"strconv"
-	"sync"
 	"time"
 )
 
 type Messager struct {
 	*Lifetime
 	*Processors
-	conf     *Config
-	round    int
-	estround int
-	seq      int
-	leaderId uint8
+	conf *Config
 
-	myId       uint8
-	rpcPeers   []*rpc.Client
-	leaderCond sync.Cond
-	msgChan    TimeoutChan // channel of PaxosMsg
+	rpcPeers []*rpc.Client
+	msgChan  TimeoutChan // channel of PaxosMsg
+	round    int
 }
 
 const BroadcaseId uint8 = 255
@@ -58,16 +52,11 @@ func NewMessager(conf *Config, processors *Processors) *Messager {
 		Lifetime:   conf.NewLifetime(),
 		Processors: processors,
 		conf:       conf,
-		round:      0,
-		seq:        0,
-		estround:   0,
-
-		myId:     conf.Id,
-		leaderId: 0,
 
 		msgChan: conf.NewTimeoutChan(),
 	}
-	go m.RunRpcServer()
+	m.RunRpcServer()
+	time.Sleep(time.Second)
 	return m
 }
 
@@ -80,9 +69,6 @@ func (m *Messager) Run() {
 	for !m.dead.Load() {
 		msg, err := m.msgChan.Read(m.ctx)
 		if err != nil {
-			if IsBumpErr(err) {
-				m.BumpRound(0)
-			}
 			continue
 		}
 		m.HandleMsg(msg)
@@ -90,38 +76,35 @@ func (m *Messager) Run() {
 }
 
 func (m *Messager) HandleMsg(msg *PaxosMsg) {
-	if msg.From == m.myId { // TX
+	round := m.round
+	seq := m.follower.roundseq.Seq // choose a random good value
+	myid := m.conf.Id
+
+	if msg.To != myid { // TX
 		m.Send(msg)
 	} else {
 		// RX
-		estround := m.conf.RoundSeqs*msg.Round + msg.Seq
-		if estround < m.estround {
+		m.logger.logger.Printf("Recv msg, type=%d, round=%d, seq=%d, from=%d, to=%d",
+			msg.Type, msg.Round, msg.Seq, msg.From, msg.To)
+		if msg.Round < round {
 			m.Send(&PaxosMsg{
 				Type:  MsgNack,
-				Round: m.round,
-				Seq:   m.seq,
+				Round: round,
+				Seq:   seq,
 				To:    msg.From,
 			})
-		} else if estround > m.estround {
-			m.seq = msg.Seq
-			if m.round < msg.Round {
-				m.BumpRound(msg.Round)
-			}
+		} else if msg.Round > round {
+			m.BumpRound(msg.Round, msg.Seq)
 		} else {
-			isLeader := m.myId == m.leaderId
 			switch msg.Type {
 			case MsgNack:
 				// ignore
 			case MsgRead, MsgImpose, MsgDecide, MsgPropose, MsgCommit:
 				// from leader
-				if !isLeader {
-					m.Processors.follower.Push(m.ctx, msg)
-				}
+				m.Processors.follower.Push(m.ctx, msg)
 			case MsgGather, MsgAck:
 				// from follower
-				if isLeader {
-					m.Processors.leader.Push(m.ctx, msg)
-				}
+				m.Processors.leader.Push(m.ctx, msg)
 			}
 		}
 	}
@@ -134,10 +117,26 @@ func (m *Messager) RunRoundBumper() {
 	for !m.dead.Load() {
 		select {
 		case <-t.C:
-			m.PushBumpRound(m.ctx)
+			rs := m.leader.roundseq.Read()
+			m.BumpRound(rs.Round+1, 0)
 		case <-m.ctx.Done():
 		}
 	}
+}
+
+func (m *Messager) BumpRound(round, seq int) {
+	rs := m.leader.roundseq.SetNewer(round, seq)
+	m.follower.roundseq.SetNewer(round, seq)
+
+	msg := &PaxosMsg{
+		Type:  MsgBump,
+		From:  uint8(rs.MyId),
+		To:    uint8(rs.MyId),
+		Seq:   rs.Seq,
+		Round: rs.Round,
+	}
+	m.leader.Push(m.ctx, msg)
+	m.follower.Push(m.ctx, msg)
 }
 
 func (m *Messager) RunRpcServer() {
@@ -147,8 +146,9 @@ func (m *Messager) RunRpcServer() {
 	if e != nil {
 		log.Fatal("listen error:", e)
 	}
+	println("Listening at", m.conf.Port)
 	// TODO: graceful shutdown
-	http.Serve(l, nil)
+	go http.Serve(l, nil)
 }
 
 func (m *Messager) ConnPeers() {
@@ -163,84 +163,33 @@ func (m *Messager) ConnPeers() {
 
 func (m *Messager) Send(msg *PaxosMsg) {
 	var dummyReply struct{}
+	m.logger.logger.Printf("Send msg, type=%d, round=%d, seq=%d, from=%d, to=%d",
+		msg.Type, msg.Round, msg.Seq, msg.From, msg.To)
 	if msg.To == BroadcaseId {
-		for peer := range m.conf.BCPeers {
-			msg.To = uint8(peer)
-			m.Send(msg)
-			m.rpcPeers[peer].Call("Messager.OnReceive", msg, &dummyReply)
+		for _, peer := range m.conf.BCPeers {
+			msg.To = peer
+			if err := m.rpcPeers[peer].Call("Messager.OnReceive", msg, &dummyReply); err != nil {
+				m.logger.logger.Printf("ERROR sending to peer %d: %v", peer, err)
+			}
 		}
 	} else {
-		m.rpcPeers[msg.To].Call("Messager.OnReceive", msg, &dummyReply)
+		if err := m.rpcPeers[msg.To].Call("Messager.OnReceive", msg, &dummyReply); err != nil {
+			m.logger.logger.Printf("ERROR sending to peer %d: %v", msg.To, err)
+		}
 	}
 }
 
-func (m *Messager) OnReceive(msg *PaxosMsg, reply any) error {
+func (m *Messager) OnReceive(msg *PaxosMsg, reply *struct{}) error {
 	m.msgChan.Write(m.ctx, msg)
 	return nil
 }
 
-func (m *Messager) BumpRound(new int) {
-	if new <= m.round {
-		new = m.round + 1
-	}
-	isLeader := (m.leaderId == m.myId)
-	m.round += 1
-	m.leaderId = uint8(m.round) % m.conf.N
-	m.seq = 0
-	m.CalcEstround()
-
-	// notify leader and follower to reset
-	msg := &PaxosMsg{
-		Type:  MsgBump,
-		From:  m.myId,
-		To:    m.myId,
-		Seq:   m.seq,
-		Round: m.round,
-	}
-	if isLeader {
-		m.Processors.leader.Push(m.ctx, msg)
-	} else {
-		m.Processors.follower.Push(m.ctx, msg)
-	}
-	// wake up another
-	m.leaderCond.Broadcast()
-}
-
-func (m *Messager) CalcEstround() {
-	m.estround = m.round*m.conf.RoundSeqs + m.seq
-}
-
 // methods allowed to call from external processors
 
-// returns round and seq
-func (m *Messager) WaitUntil(leader bool) (int, int) {
-	for !m.dead.Load() && (m.leaderId == m.myId) != leader {
-		m.leaderCond.Wait()
-	}
-	return m.round, m.seq
-}
-
 // only type, to, data will be preserved
-func (m *Messager) Push(ctx context.Context, msg *PaxosMsg) {
-	msg.From = m.myId
-	msg.Seq = m.seq
-	msg.Round = m.round
+func (m *Messager) Push(ctx context.Context, msg *PaxosMsg, rs RoundSeq) {
+	msg.From = uint8(rs.MyId)
+	msg.Round = rs.Round
+	msg.Seq = rs.Seq
 	m.msgChan.Write(m.ctx, msg)
-}
-
-// round bump happens when round end or
-func (m *Messager) PushBumpRound(ctx context.Context) {
-	m.Push(ctx, &PaxosMsg{
-		Type: MsgBump,
-		To:   m.myId,
-	})
-}
-
-// should only called by active one of leader and follower
-func (m *Messager) BumpSeq(ctx context.Context) {
-	m.seq += 1
-	if m.seq >= m.conf.RoundSeqs {
-		m.seq = 0
-		m.PushBumpRound(ctx)
-	}
 }

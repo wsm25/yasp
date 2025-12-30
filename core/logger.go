@@ -2,6 +2,7 @@ package core
 
 import (
 	"crypto/sha256"
+	"encoding/gob"
 	"fmt"
 	"log"
 	"os"
@@ -21,6 +22,11 @@ type Logger struct {
 	logFile      *os.File    // log file handle
 }
 
+func init() {
+	// Register a zero value of the concrete type []core.Log
+	gob.Register([]Log{})
+}
+
 // NewLogger initializes a Logger with file-based logging.
 func NewLogger(conf *Config) *Logger {
 	logDir := "../log/"
@@ -28,7 +34,7 @@ func NewLogger(conf *Config) *Logger {
 		fmt.Println("failed to create log directory:", err)
 	}
 	logfile := logDir + "node" + strconv.Itoa(int(conf.Id)) + ".log"
-	f, err := os.OpenFile(logfile, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0777)
+	f, err := os.OpenFile(logfile, os.O_CREATE|os.O_RDWR|os.O_TRUNC, 0777)
 	if err != nil {
 		fmt.Println("create log file failed:", err.Error())
 		return nil
@@ -58,7 +64,7 @@ func (l *Logger) Propose(log Log) {
 
 	l.mu.Lock()
 	l.proposingMap[estround] = log
-	entryStr := fmt.Sprintf("generate Instance[%s] in seq %d at %s\n", key, estround, time.Now())
+	entryStr := fmt.Sprintf("generate Instance[%s] in seq %d at %s", key, estround, time.Now())
 	l.logger.Println(entryStr)
 	l.mu.Unlock()
 }
@@ -74,8 +80,7 @@ func (l *Logger) Merge(logs []Log) (proposing []int) {
 		l.proposingMap[estround] = e
 		proposing = append(proposing, estround)
 		key := Data2Key(e.Data)
-		entryStr := fmt.Sprintf("generate Instance[%s] in seq %d at %s\n", key, estround, time.Now())
-		l.logger.Println(entryStr)
+		l.logger.Printf("generate Instance[%s] in seq %d at %s", key, estround, time.Now())
 	}
 	l.mu.Unlock()
 	return
@@ -89,8 +94,7 @@ func (l *Logger) Commit(estround int) {
 	l.commitList = append(l.commitList, logEntry)
 	l.commitSet[logEntry.Estround] = struct{}{}
 	key := Data2Key(logEntry.Data)
-	entryStr := fmt.Sprintf("commit Instance[%s] in seq %d at %s\n", key, estround, time.Now())
-	l.logger.Println(entryStr)
+	l.logger.Printf("commit Instance[%s] in seq %d at %s\n", key, estround, time.Now())
 	defer l.mu.Unlock()
 }
 
@@ -114,7 +118,7 @@ func Data2Key(data []byte) string {
 	hash.Write(data)
 	h := hash.Sum(nil)
 	for i := range h {
-		h[i] += 97
+		h[i] = 97 + h[i]%26
 	}
 	return string(h)
 }

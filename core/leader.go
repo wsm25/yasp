@@ -8,6 +8,7 @@ import (
 
 type Leader struct {
 	*Lifetime
+	roundseq   *RoundSeqManager
 	processors *Processors
 	conf       *Config
 	leaderChan TimeoutChan
@@ -16,6 +17,7 @@ type Leader struct {
 func NewLeader(conf *Config, processors *Processors) *Leader {
 	return &Leader{
 		Lifetime:   conf.NewLifetime(),
+		roundseq:   NewRoundSeq(conf),
 		processors: processors,
 		conf:       conf,
 		leaderChan: conf.NewTimeoutChan(),
@@ -26,50 +28,54 @@ func (l *Leader) Run() {
 	defer l.Kill()
 	for !l.dead.Load() {
 		// new round
-		round, seq := l.processors.messager.WaitUntil(false)
+		println("Waiting leader")
+		rs := l.roundseq.WaitLeader()
+		round, seq := rs.Round, rs.Seq
+		println("New leader round", round, seq)
 
 		// sync
 		if seq == 0 {
-			err := l.Sync(round)
+			err := l.Sync(rs)
 			if err != nil {
 				if !IsBumpErr(err) {
-					l.processors.messager.PushBumpRound(l.ctx)
+					// l.processors.roundseq.BumpRound(round + 1)
 				}
 				continue
 			}
 		}
 
 		// keep generate and impose
-		for s := seq; s <= l.conf.RoundSeqs; s++ {
-			err := l.DoSeq(round, s)
+		for {
+			err := l.DoSeq(rs)
 			if err != nil {
 				if !IsBumpErr(err) {
-					l.processors.messager.PushBumpRound(l.ctx)
+					// l.processors.roundseq.BumpRound(round + 1)
 				}
 				continue
 			}
-			l.processors.messager.BumpSeq(l.ctx)
+			rs = l.roundseq.BumpSeq()
+			seq++
+			if rs.Round != round || rs.Seq != seq {
+				break
+			}
 		}
 	}
 }
 
 // init sync at begin of round
-func (l *Leader) Sync(round int) error {
+func (l *Leader) Sync(rs RoundSeq) error {
 	quorum := l.conf.Q
 
 	// 1. read
 	l.processors.messager.Push(l.ctx, &PaxosMsg{
 		Type: MsgRead,
 		To:   BroadcaseId,
-	})
+	}, rs)
 
 	// 2. gather
 	var ready uint8 = 0
-	localData := l.processors.logger.LoadHistory()
+	localData := make([]Log, 0)
 	localMap := make(map[int]int) // Estround -> index in localData
-	for i, log := range localData {
-		localMap[log.Estround] = i
-	}
 	for ready < quorum {
 		msg, err := l.leaderChan.Read(l.ctx)
 		if err != nil {
@@ -101,12 +107,11 @@ func (l *Leader) Sync(round int) error {
 	})
 
 	// 3. impose
-	proposing := l.processors.logger.Merge(localData)
 	l.processors.messager.Push(l.ctx, &PaxosMsg{
 		Type: MsgImpose,
 		Data: localData,
 		To:   BroadcaseId,
-	})
+	}, rs)
 
 	// 4. ack
 	ready = 0
@@ -121,35 +126,29 @@ func (l *Leader) Sync(round int) error {
 	}
 
 	// 5. decide
-	for _, estround := range proposing {
-		l.processors.logger.Commit(estround)
-	}
 	l.processors.messager.Push(l.ctx, &PaxosMsg{
 		Type: MsgDecide,
 		To:   BroadcaseId,
-	})
+	}, rs)
 
 	return nil
 }
 
-func (l *Leader) DoSeq(round int, seq int) error {
+func (l *Leader) DoSeq(rs RoundSeq) error {
 	// generate and impose
 	data := make([]byte, l.conf.DataSize)
 	rand.Read(data)
-	estround := round*l.conf.RoundSeqs + seq
 
 	// 1. propose
-	l.processors.logger.Propose(Log{
-		Estround: estround,
-		Data:     data,
-	})
+	l.processors.logger.logger.Printf("Leader proposing, round=%d, seq=%d", rs.Round, rs.Seq)
 	l.processors.messager.Push(l.ctx, &PaxosMsg{
 		Type: MsgPropose,
 		Data: data,
 		To:   BroadcaseId,
-	})
+	}, rs)
 
 	// 2. ack
+	l.processors.logger.logger.Printf("Leader acking, round=%d, seq=%d", rs.Round, rs.Seq)
 	var ready uint8 = 0
 	for ready < l.conf.Q {
 		msg, err := l.leaderChan.Read(l.ctx)
@@ -162,15 +161,14 @@ func (l *Leader) DoSeq(round int, seq int) error {
 	}
 
 	// 3. commit
-	l.processors.logger.Commit(estround)
+	l.processors.logger.logger.Printf("Leader commiting, round=%d, seq=%d", rs.Round, rs.Seq)
 	l.processors.messager.Push(l.ctx, &PaxosMsg{
 		Type: MsgCommit,
 		To:   BroadcaseId,
-	})
+	}, rs)
 	return nil
 }
 
 func (l *Leader) Push(ctx context.Context, msg *PaxosMsg) {
 	l.leaderChan.Write(ctx, msg)
-
 }

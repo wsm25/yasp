@@ -59,9 +59,13 @@ Go 本身上手很简单，无非变量、函数，一如任何你写过的其�
 
 - 没有永远 block 的 operation；所有 channel 读必须要有 timeout
 - 所有写 operation 都是 nonblocking
+- bump: 有四种原因：round end, timeout, timer trigger, get larger;
+  - 重复 bump: 不管了
+  - bump 中不可读，会发一个 bumpmsg to active (非 round end)
+  - 大概率从 seq=0，小概率 (larger) 从中间开始
 - bump: msgr 会发送 bump msg 给 leader or follower (the active one)
 - invariant: if leader is active, leader should be reading, and follower should be waiting; vice versa
-
+` 
 
 
 ### 技术选型
